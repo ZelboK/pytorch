@@ -4,7 +4,7 @@
 #include <ATen/Parallel.h>
 #include <ATen/native/cpu/mixed_data_type.h>
 #include <c10/util/accumulate.h>
-
+#include <iostream>
 #ifndef AT_PER_OPERATOR_HEADERS
 #include <ATen/Functions.h>
 #include <ATen/NativeFunctions.h>
@@ -68,6 +68,9 @@ std::tuple<Tensor, Tensor, Tensor> native_group_norm(
     int64_t HxW,
     int64_t group,
     double eps) {
+              std::cout << std::endl;
+
+        std::cout << "group_norm: N: " << N << " C: " << C << " HxW: " << HxW << " group: " << group << std::endl; 
   // See [Note: hacky wrapper removal for optional tensor]
   c10::MaybeOwned<Tensor> gamma_maybe_owned =
       at::borrow_from_optional_tensor(gamma_opt);
@@ -113,6 +116,7 @@ std::tuple<Tensor, Tensor, Tensor> native_group_norm_backward(
     int64_t HxW,
     int64_t group,
     std::array<bool, 3> grad_input_mask) {
+                std::cout << "backward_norm: N: " << N << " C: " << C << " HxW: " << HxW << " group: " << group << std::endl; 
   // See [Note: hacky wrapper removal for optional tensor]
   c10::MaybeOwned<Tensor> gamma_maybe_owned =
       at::borrow_from_optional_tensor(gamma_opt);

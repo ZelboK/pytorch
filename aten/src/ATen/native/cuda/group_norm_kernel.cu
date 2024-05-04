@@ -8,6 +8,7 @@
 #include <ATen/core/Tensor.h>
 #include <ATen/AccumulateType.h>
 #include <ATen/Dispatch.h>
+#include <iostream>
 #include <ATen/native/SharedReduceOps.h>
 #include <ATen/native/TensorIterator.h>
 #include <c10/cuda/CUDAMathCompat.h>
@@ -563,6 +564,10 @@ void GroupNormKernelImplInternal(
     Tensor& Y,
     Tensor& mean,
     Tensor& rstd) {
+      std::cout << "N: " << N << std::endl;
+      std::cout << std::endl;
+            std::cout << std::endl;
+
   using T_ACC = acc_type<T, true>;
   TORCH_CHECK(X.numel() == N * C * HxW);
   TORCH_CHECK(!gamma.defined() || gamma.numel() == C);
@@ -577,6 +582,7 @@ void GroupNormKernelImplInternal(
   T* rstd_data = rstd.mutable_data_ptr<T>();
 
   cudaStream_t cuda_stream = at::cuda::getCurrentCUDAStream();
+  std::cout << "HxW:" << HxW << std::endl;
   const int64_t num_threads = D * HxW < cuda_utils::kCUDABlockReduceNumThreads
       ? at::cuda::warp_size()
       : cuda_utils::kCUDABlockReduceNumThreads;
