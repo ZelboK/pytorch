@@ -2,6 +2,7 @@
 #include <ATen/native/group_norm.h>
 
 #include <type_traits>
+#include <iomanip>
 
 #include <thrust/tuple.h>
 
@@ -12,6 +13,7 @@
 #include <ATen/native/SharedReduceOps.h>
 #include <ATen/native/TensorIterator.h>
 #include <c10/cuda/CUDAMathCompat.h>
+#include <c10/core/MemoryFormat.h>
 #include <ATen/cuda/detail/IndexUtils.cuh>
 #include <ATen/native/cuda/Loops.cuh>
 #include <ATen/native/cuda/block_reduce.cuh>
@@ -29,13 +31,89 @@ namespace {
 constexpr int kCUDANumThreads = 256;
 constexpr int kReduceTileSize = 32;
 
+__device__ void index_to_nchw(int64_t index, int64_t N, int64_t C, int64_t H, int64_t W,
+                              int64_t &n, int64_t &c, int64_t &h, int64_t &w) {
+    int64_t remaining = index;
+    w = remaining % W;
+    remaining /= W;
+    h = remaining % H;
+    remaining /= H;
+    c = remaining % C;
+    n = remaining / C;
+}
+
+template <typename T>
+__global__ void RowWiseNHWC(
+    int64_t group_span,
+    int64_t H,
+    int64_t W,
+    int64_t C,
+    int64_t num_ch_group,
+    T eps,
+    const T *X,
+    T *mean,
+    T *rstd)
+{
+    using T_ACC = acc_type<T, true>;
+    using WelfordType = WelfordData<T_ACC, int64_t>;
+    using WelfordOp =
+        WelfordOps<T_ACC, T_ACC, int64_t, thrust::pair<T_ACC, T_ACC>>;
+
+    const int64_t bx = blockIdx.x;
+    WelfordOp welford_op = {/*correction=*/0, /*take_sqrt=*/false};
+    WelfordType val(0, 0, 0, 0);
+
+    for (int64_t j = threadIdx.x; j <= group_span; j += H*C) {
+    //  const int64_t index = bx * group_span + j;
+
+      int nhwc_h = (j / (W * C)) % H;
+      int nhwc_w = (j / C) % W;
+      int nhwc_c = j % C;
+      int index = bx * H * W * C + nhwc_h * W * C + nhwc_w * C + nhwc_c;
+      int remaining = index;
+      int c = remaining % C;
+      remaining /= C;
+      int w = remaining % W;
+      remaining /= W;
+      int h = remaining % H;
+      int b = remaining / H;
+      if(bx == 0) {
+        printf("B%dH%dW%dC%d\n", b, h, w, c);
+      }
+      val = welford_op.reduce(val, static_cast<T_ACC>(X[index]), index);
+    }
+    if (blockDim.x <= C10_WARP_SIZE) {
+    val = cuda_utils::WarpReduce(val, welford_op);
+  } else {
+    // There will be a warning if we declare a __shared__ WelfordType array.
+    // https://github.com/pytorch/pytorch/pull/13967
+    __shared__ typename std::aligned_storage<
+        sizeof(WelfordType),
+        alignof(WelfordType)>::type val_shared[C10_WARP_SIZE];
+    WelfordType* val_shared_ptr = reinterpret_cast<WelfordType*>(val_shared);
+    val = cuda_utils::BlockReduce(
+        val,
+        welford_op,
+        /*identity_element=*/WelfordType(0, 0, 0, 0),
+        val_shared_ptr);
+  }
+  if (threadIdx.x == 0)
+    {
+      T_ACC m1;
+      T_ACC m2;
+      thrust::tie(m2, m1) = welford_op.project(val);
+      mean[bx] = m1;
+      rstd[bx] = c10::cuda::compat::rsqrt(m2 + static_cast<T_ACC>(eps));
+    }
+}
+
 template <typename T>
 __global__ void RowwiseMomentsCUDAKernel(
-    int64_t N,
+    int64_t group_span,
     T eps,
     const T* X,
     T* mean,
-    T* rstd) {
+    T* rstd, int64_t H, int64_t W, int64_t C) {
   using T_ACC = acc_type<T, true>;
   using WelfordType = WelfordData<T_ACC, int64_t>;
   using WelfordOp =
@@ -44,8 +122,16 @@ __global__ void RowwiseMomentsCUDAKernel(
   const int64_t i = blockIdx.x;
   WelfordOp welford_op = {/*correction=*/0, /*take_sqrt=*/false};
   WelfordType val(0, 0, 0, 0);
-  for (int64_t j = threadIdx.x; j < N; j += blockDim.x) {
-    const int64_t index = i * N + j;
+  for (int64_t j = threadIdx.x; j < group_span; j += blockDim.x) {
+    const int64_t index = i * group_span + j;
+    
+    // int64_t n, c, h, w;
+    // index_to_nchw(index, group_span, C, H, W, n, c, h, w);
+
+    // if(i == 0) {
+    //   printf("Source: B%lldH%lldW%lldC%lld\n", n, h, w, c);
+    // }
+
     val = welford_op.reduce(val, static_cast<T_ACC>(X[index]), index);
   }
   if (blockDim.x <= C10_WARP_SIZE) {
@@ -564,9 +650,6 @@ void GroupNormKernelImplInternal(
     Tensor& Y,
     Tensor& mean,
     Tensor& rstd) {
-      std::cout << "N: " << N << std::endl;
-      std::cout << std::endl;
-            std::cout << std::endl;
 
   using T_ACC = acc_type<T, true>;
   TORCH_CHECK(X.numel() == N * C * HxW);
@@ -575,21 +658,54 @@ void GroupNormKernelImplInternal(
   if (N == 0) {
     return;
   }
+
   const int64_t G = group;
   const int64_t D = C / G;
   const T* X_data = X.const_data_ptr<T>();
+  Tensor cloned_tensor = X.clone().to(at::MemoryFormat::ChannelsLast);
+  const T* cloned = cloned_tensor.const_data_ptr<T>();
   T* mean_data = mean.mutable_data_ptr<T>();
   T* rstd_data = rstd.mutable_data_ptr<T>();
+  Tensor mean_cloned = mean.clone();
+  Tensor rstd_cloned = rstd.clone();
+  T* mean_data_clone = mean_cloned.mutable_data_ptr<T>();
+  T* rstd_data_clone = rstd_cloned.mutable_data_ptr<T>();
 
   cudaStream_t cuda_stream = at::cuda::getCurrentCUDAStream();
-  std::cout << "HxW:" << HxW << std::endl;
   const int64_t num_threads = D * HxW < cuda_utils::kCUDABlockReduceNumThreads
       ? at::cuda::warp_size()
       : cuda_utils::kCUDABlockReduceNumThreads;
-  RowwiseMomentsCUDAKernel<T><<<N * G, num_threads, 0, cuda_stream>>>(
-      D * HxW, eps, X_data, mean_data, rstd_data);
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  std::cout << std::left << std::setw(6) << "N"
+              << std::setw(8) << "HxW"
+              << std::setw(6) << "D"
+              << std::setw(6) << "C"
+              << std::setw(6) << "G" << std::endl;
 
+  std::cout << std::left << std::setw(6) << N
+              << std::setw(8) << HxW
+              << std::setw(6) << D
+              << std::setw(6) << C
+              << std::setw(6) << G << std::endl;
+
+    int height = cloned_tensor.size(2);
+    int width = cloned_tensor.size(3);
+    std::cout << std::setw(6) << width << "," << height << std::endl;
+  RowWiseNHWC<T><<<N * G, num_threads, 0, cuda_stream>>>(
+      C*height*D, height, width, C, D, eps, cloned, mean_data_clone, rstd_data_clone);
+
+  // RowwiseMomentsCUDAKernel<T><<<N * G, num_threads, 0, cuda_stream>>>(
+  //     D * HxW, eps, cloned, mean_data_clone, rstd_data_clone);
+
+  RowwiseMomentsCUDAKernel<T><<<N * G, num_threads, 0, cuda_stream>>>(
+      D * HxW, eps, X_data, mean_data, rstd_data, height, width, C);
+
+
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  std::cout << mean << std::endl;
+  std::cout << mean_cloned << std::endl;
+  std::cout << "Done with mean. Now rstd" << std::endl;
+  std::cout << rstd << std::endl;
+  std::cout << rstd_cloned << std::endl;
   if (HxW == 1) {
     GroupNorm1dForward<T>(X, mean, rstd, gamma, beta, N, C, G, Y);
   } else if (!gamma.defined() && !beta.defined()) {

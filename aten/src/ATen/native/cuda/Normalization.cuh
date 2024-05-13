@@ -101,6 +101,9 @@ struct SumReduceOp<Float2<scalar_t, accscalar_t>> {
     }
 };
 
+template <class T>
+struct yba;
+
 // Sum across (batch, x/y/z) applying Op() pointwise
 // this works by first having each thread sum it's part
 // of the data. Then there is a double-shuffling reduction.
@@ -114,9 +117,14 @@ template<typename scalar_t, typename Op, typename PTA>
 __device__ scalar_t reduce(Op op, PTA tensor, int plane) {
   // first the reductions each thread does separately
   scalar_t sum = static_cast<scalar_t>(0);
+    printf("Without my lovesssssss?\n");
+
   for (int batch = threadIdx.y; batch < tensor.size(0); batch += blockDim.y) {
     for (int x = threadIdx.x; x < tensor.size(2); x += blockDim.x) {
       sum += op(batch, plane, x);
+      if(threadIdx.x == 0 && blockIdx.x == 0) {
+        printf("sum: %f \n", sum);
+      }
     }
   }
   __shared__ scalar_t shared[C10_WARP_SIZE];

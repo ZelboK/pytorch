@@ -70,7 +70,7 @@ std::tuple<Tensor, Tensor, Tensor> native_group_norm(
     double eps) {
               std::cout << std::endl;
 
-        std::cout << "group_norm: N: " << N << " C: " << C << " HxW: " << HxW << " group: " << group << std::endl; 
+        std::cout << "group_norm: N: " << N << " C: " << C << " HxW: " << HxW << " group: " << group << std::endl;
   // See [Note: hacky wrapper removal for optional tensor]
   c10::MaybeOwned<Tensor> gamma_maybe_owned =
       at::borrow_from_optional_tensor(gamma_opt);
@@ -83,7 +83,7 @@ std::tuple<Tensor, Tensor, Tensor> native_group_norm(
   auto memory_format = X.device().is_cpu() ?
       X.suggest_memory_format() : at::MemoryFormat::Contiguous;
 
-  TORCH_CHECK(X.is_contiguous(memory_format));
+  //TORCH_CHECK(X.is_contiguous(memory_format));
 
   bool mixed_type = is_mixed_type(X, gamma, beta);
   if (mixed_type) {
@@ -116,7 +116,7 @@ std::tuple<Tensor, Tensor, Tensor> native_group_norm_backward(
     int64_t HxW,
     int64_t group,
     std::array<bool, 3> grad_input_mask) {
-                std::cout << "backward_norm: N: " << N << " C: " << C << " HxW: " << HxW << " group: " << group << std::endl; 
+                std::cout << "backward_norm: N: " << N << " C: " << C << " HxW: " << HxW << " group: " << group << std::endl;
   // See [Note: hacky wrapper removal for optional tensor]
   c10::MaybeOwned<Tensor> gamma_maybe_owned =
       at::borrow_from_optional_tensor(gamma_opt);
@@ -201,8 +201,15 @@ Tensor group_norm(
 
   const Tensor kEmpty;
   auto memory_format = input.suggest_memory_format();
-  const auto& X = input.device().is_cpu() || input.device().is_xpu() ?
-      input.contiguous(memory_format) : input.contiguous();
+
+  std::cout << "shape: " << input_shape << std::endl;
+  std::cout << "mem format: " << memory_format << std::endl;
+  std::cout << "X_mem: " << input.is_contiguous();
+
+ // const auto& X = input.contiguous(memory_format);
+  //const auto& X = input.device().is_cpu() || input.device().is_xpu() ?
+ //     input.contiguous(memory_format) : input.contiguous();
+  const auto& X = input.contiguous(memory_format);
   const auto& gamma = weight.defined() ? weight.contiguous() : kEmpty;
   const auto& beta = bias.defined() ? bias.contiguous() : kEmpty;
   TORCH_CHECK(!gamma.defined() || gamma.sym_numel() == C);
