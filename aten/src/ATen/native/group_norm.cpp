@@ -4,7 +4,6 @@
 #include <ATen/Parallel.h>
 #include <ATen/native/cpu/mixed_data_type.h>
 #include <c10/util/accumulate.h>
-#include <iostream>
 #ifndef AT_PER_OPERATOR_HEADERS
 #include <ATen/Functions.h>
 #include <ATen/NativeFunctions.h>
@@ -68,9 +67,7 @@ std::tuple<Tensor, Tensor, Tensor> native_group_norm(
     int64_t HxW,
     int64_t group,
     double eps) {
-              std::cout << std::endl;
 
-        std::cout << "group_norm: N: " << N << " C: " << C << " HxW: " << HxW << " group: " << group << std::endl;
   // See [Note: hacky wrapper removal for optional tensor]
   c10::MaybeOwned<Tensor> gamma_maybe_owned =
       at::borrow_from_optional_tensor(gamma_opt);
@@ -80,15 +77,13 @@ std::tuple<Tensor, Tensor, Tensor> native_group_norm(
   // repeated check so expanded weights can call native_group_norm directly but
   // save mean and variance from forward
   check_group_norm_inputs(X, gamma, beta, C, group);
-  auto memory_format = X.device().is_cpu() ?
-      X.suggest_memory_format() : at::MemoryFormat::Contiguous;
-
-  //TORCH_CHECK(X.is_contiguous(memory_format));
+  auto memory_format = X.suggest_memory_format();
 
   bool mixed_type = is_mixed_type(X, gamma, beta);
   if (mixed_type) {
     check_mixed_data_type(X, gamma, beta);
   }
+
 
   Tensor Y = at::native::empty_like(
       X,
@@ -100,6 +95,8 @@ std::tuple<Tensor, Tensor, Tensor> native_group_norm(
   const auto dtype = param_scalar_type(X, mixed_type);
   Tensor mean = at::empty({N, group}, X.options().dtype(dtype));
   Tensor rstd = at::empty({N, group}, X.options().dtype(dtype));
+
+
   GroupNormKernel(
       X.device().type(), X, gamma, beta, N, C, HxW, group, eps, Y, mean, rstd);
   return std::make_tuple(Y, mean, rstd);
@@ -116,7 +113,6 @@ std::tuple<Tensor, Tensor, Tensor> native_group_norm_backward(
     int64_t HxW,
     int64_t group,
     std::array<bool, 3> grad_input_mask) {
-                std::cout << "backward_norm: N: " << N << " C: " << C << " HxW: " << HxW << " group: " << group << std::endl;
   // See [Note: hacky wrapper removal for optional tensor]
   c10::MaybeOwned<Tensor> gamma_maybe_owned =
       at::borrow_from_optional_tensor(gamma_opt);
@@ -202,13 +198,6 @@ Tensor group_norm(
   const Tensor kEmpty;
   auto memory_format = input.suggest_memory_format();
 
-  std::cout << "shape: " << input_shape << std::endl;
-  std::cout << "mem format: " << memory_format << std::endl;
-  std::cout << "X_mem: " << input.is_contiguous();
-
- // const auto& X = input.contiguous(memory_format);
-  //const auto& X = input.device().is_cpu() || input.device().is_xpu() ?
- //     input.contiguous(memory_format) : input.contiguous();
   const auto& X = input.contiguous(memory_format);
   const auto& gamma = weight.defined() ? weight.contiguous() : kEmpty;
   const auto& beta = bias.defined() ? bias.contiguous() : kEmpty;
