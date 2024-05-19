@@ -1,14 +1,12 @@
 #define TORCH_ASSERT_ONLY_METHOD_OPERATORS
 #include <ATen/native/group_norm.h>
 
-#include <iomanip>
 #include <type_traits>
 
 #include <thrust/tuple.h>
 
 #include <ATen/AccumulateType.h>
 #include <ATen/Dispatch.h>
-#include <ATen/core/Tensor.h>
 #include <ATen/native/SharedReduceOps.h>
 #include <ATen/native/TensorIterator.h>
 #include <c10/core/MemoryFormat.h>
