@@ -208,14 +208,14 @@ TORCH_META_FUNC(reflection_pad3d_backward)(
 namespace at::native {
 
 namespace {
-
+#include <iostream>
 void reflection_pad2d_out_template(
     Tensor &output, const Tensor &input, IntArrayRef padding) {
   int dim_w = 2;
   int dim_h = 1;
   int dim_slices = 0;
   int64_t nbatch = 1;
-
+  std::cout << "reflectionpad.cpp : reflection_pad2d_out_template\n";
   at::native::padding::check_valid_input<2>(input, padding);
 
   int ndim = input.dim();
@@ -328,12 +328,16 @@ TORCH_IMPL_FUNC(reflection_pad1d_backward_out_cpu)(const Tensor& grad_output,
 
 Tensor& reflection_pad2d_out_cpu(const Tensor& input, IntArrayRef padding,
     Tensor& output) {
+      
+  std::cout << "reflectionpad.cpp : reflection_pad2d_out_template_cpu\n";
   reflection_pad2d_out_template(output, input, padding);
   return output;
 }
 
 Tensor reflection_pad2d_cpu(const Tensor& input, IntArrayRef padding) {
   Tensor output = at::empty({0}, input.options());
+  
+  std::cout << "reflectionpad.cpp : reflection_pad2d_out_template_cpu_cpu_cpu\n";
   reflection_pad2d_out_template(output, input, padding);
   return output;
 }

@@ -142,6 +142,67 @@ __global__ void reflection_pad2d_out_kernel(
 }
 
 template <typename scalar_t>
+__global__ void reflection_pad2d_backward_det_out_kernel(
+    scalar_t * grad_input, const scalar_t * grad_output,
+    int64_t input_dim_x, int64_t input_dim_y,
+    int pad_t, int pad_b, int pad_l, int pad_r, int y_shift, int z_shift, int nplane) {
+      auto input_xy = threadIdx.x + blockIdx.x * blockDim.x;
+      auto output_dim_x = input_dim_x + pad_l + pad_r;
+      auto output_dim_y = input_dim_y + pad_t + pad_b;
+
+    if (input_xy < output_dim_x * output_dim_y) {
+      scalar_t partial = 0;
+      const unsigned int row = input_xy % input_dim_x;
+      const unsigned int col = row / input_dim_x;
+      const bool is_top = (row >= 1) && (row <= 1 + row + pad_t);
+      const bool is_bottom = (row <= input_dim_y - 1 && row >= input_dim_y - 1 - pad_b);      
+      const bool is_left = (col >= 1 && col <= 1 + pad_l);
+      const bool is_right = (col <= input_dim_x - 1 && col >= input_dim_x - 1 - pad_r);
+
+      if(is_top) {
+        auto output_top = row - pad_t;
+        auto output_top_linearized = output_top * output_dim_y + col;
+        partial += grad_output[output_top_linearized];
+        
+        if(is_left) {
+          auto output_top_left_linear = 
+            output_top * output_dim_y + (col - pad_l); // OOB possibility or nah?
+          partial += grad_output[output_top_left_linear];
+
+        } else if(is_right) {
+          auto output_top_right_linear = 
+            output_top * output_dim_y + (col + pad_r); // OOB possibility or nah?
+          
+          partial += grad_output[output_top_right_linear];
+        }
+      }
+      if(is_bottom) {
+        auto output_bot_row = row + pad_b;
+        auto output_bot_linear = output_bot_row * output_dim_x + col;
+
+        partial += grad_output[output_bot_linear];
+
+        if(is_left) {
+          auto output_bot_left_linear = output_bot_row * output_dim_x + (col - pad_l);
+          partial += grad_output[output_bot_left_linear];
+
+        } else if (is_right) {
+          auto output_bot_right_linear = output_bot_row * output_dim_x + (col + pad_r);
+          partial += grad_output[output_bot_right_linear];
+        }
+      } 
+      if (is_left) {
+        auto output_bot_left_linear = row * output_dim_x + (col - pad_l);
+        partial += grad_output[output_bot_left_linear];
+      } else if(is_right) {
+        auto output_bot_right_linear = row * output_dim_x + (col + pad_r);
+        partial += grad_output[output_bot_right_linear];
+      }
+      grad_input[input_xy] += partial;
+    }
+}
+
+template <typename scalar_t>
 __global__ void reflection_pad2d_backward_out_kernel(
     scalar_t * grad_input, const scalar_t * grad_output,
     int64_t input_dim_x, int64_t input_dim_y,
@@ -267,13 +328,13 @@ __global__ void reflection_pad3d_backward_out_kernel(
         gpuAtomicAddNoReturn(target, value_to_add);
       });
 }
-
+#include <iostream>
 void reflection_pad2d_out_template(
     Tensor &output, const Tensor &input_, IntArrayRef padding) {
 
   TORCH_CHECK(canUse32BitIndexMath(input_),
     "input tensor must fit into 32-bit index math");
-
+  std::cout << "I'm inside the template cuda\n";
   int plane_dim = 0;
   int dim_h = 1;
   int dim_w = 2;
@@ -352,6 +413,79 @@ void reflection_pad2d_out_template(
     }
   );
 }
+
+void reflection_pad2d_backward_det_out_template(
+    Tensor &grad_input, const Tensor &grad_output_,
+    const Tensor &input, IntArrayRef padding) {
+
+  if (grad_input.numel() == 0) {
+    return;
+  }
+
+  TORCH_CHECK(canUse32BitIndexMath(input),
+    "input tensor must fit into 32-bit index math");
+  TORCH_CHECK(canUse32BitIndexMath(grad_output_),
+    "output gradient tensor must fit into 32-bit index math");
+
+  int plane_dim = 0;
+  int dim_h = 1;
+  int dim_w = 2;
+  int nbatch = 1;
+
+  if (input.ndimension() == 4) {
+    nbatch = input.size(0);
+    plane_dim++;
+    dim_h++;
+    dim_w++;
+  }
+
+  int64_t pad_l = padding[0];
+  int64_t pad_r = padding[1];
+  int64_t pad_t = padding[2];
+  int64_t pad_b = padding[3];
+
+  int nplane = input.size(plane_dim);
+  int input_h = input.size(dim_h);
+  int input_w = input.size(dim_w);
+
+  int output_h = input_h + pad_t + pad_b;
+  int output_w  = input_w + pad_l + pad_r;
+
+  TORCH_CHECK(output_w == grad_output_.size(dim_w), "grad_output width "
+    "unexpected. Expected: ", output_w, ", Got: ", grad_output_.size(dim_w));
+  TORCH_CHECK(output_h == grad_output_.size(dim_h), "grad_output height "
+    "unexpected. Expected: ", output_h, ", Got: ", grad_output_.size(dim_h));
+
+  Tensor grad_output = grad_output_.contiguous();
+
+  int64_t output_plane_size = output_h * output_w;
+  dim3 block_size(output_plane_size > 256 ? 256 : output_plane_size);
+
+  int64_t size_y = nplane;
+  int64_t size_z = nbatch;
+
+  AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES_AND2(kHalf, kBFloat16,
+    input.scalar_type(), "reflection_pad2d_backward_out_template", [&] {
+
+      for (int64_t block_y = 0; block_y < size_y; block_y += 65535) {
+        int64_t block_y_size = std::min(size_y - block_y, static_cast<int64_t>(65535));
+        for (int64_t block_z = 0; block_z < size_z; block_z += 65535) {
+          int64_t block_z_size = std::min(size_z - block_z, static_cast<int64_t>(65535));
+
+          dim3 grid_size(at::ceil_div(output_plane_size, static_cast<int64_t>(256)), block_y_size, block_z_size);
+
+          reflection_pad2d_backward_det_out_kernel<<<
+            grid_size, block_size, 0, at::cuda::getCurrentCUDAStream()>>>(
+              grad_input.mutable_data_ptr<scalar_t>(), grad_output.const_data_ptr<scalar_t>(),
+              input_w, input_h,
+              pad_t, pad_b, pad_l, pad_r, block_y, block_z, nplane);
+          C10_CUDA_KERNEL_LAUNCH_CHECK();
+        }
+      }
+    }
+  );
+}
+
 
 void reflection_pad2d_backward_out_template(
     Tensor &grad_input, const Tensor &grad_output_,
@@ -529,11 +663,14 @@ TORCH_IMPL_FUNC(reflection_pad1d_backward_out_cuda)(const Tensor& grad_output_,
 
 Tensor& reflection_pad2d_out_cuda(const Tensor& input, IntArrayRef padding,
     Tensor& output) {
+      std::cout << "reflection_pad2d_out_cuda\n";
   reflection_pad2d_out_template(output, input, padding);
   return output;
 }
 
 Tensor reflection_pad2d_cuda(const Tensor& input, IntArrayRef padding) {
+        std::cout << "reflection_pad2d_cuda\n";
+
   auto output = at::empty({0}, input.options());
   reflection_pad2d_out_template(output, input, padding);
   return output;
@@ -545,10 +682,23 @@ Tensor& reflection_pad2d_backward_out_cuda(const Tensor& grad_output,
     Tensor& grad_input) {
   // See Note [Writing Nondeterministic Operations]
   // Nondeterministic because of atomicAdd usage
+          std::cout << "reflection_pad2d_backward_out_cuda\n";
+
   globalContext().alertNotDeterministic("reflection_pad2d_backward_out_cuda");
   grad_input.resize_as_(input);
   grad_input.zero_();
   reflection_pad2d_backward_out_template(
+    grad_input, grad_output, input, padding);
+  return grad_input;
+}
+
+Tensor& reflection_pad2d_backward_det_out_cuda(const Tensor& grad_output,
+    const Tensor& input,
+    IntArrayRef padding,
+    Tensor& grad_input) {
+  grad_input.resize_as_(input);
+  grad_input.zero_();
+  reflection_pad2d_backward_det_out_template(
     grad_input, grad_output, input, padding);
   return grad_input;
 }
