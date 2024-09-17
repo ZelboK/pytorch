@@ -8804,6 +8804,7 @@ class TestNNDeviceType(NNTestCase):
 
     @onlyCUDA   # Test if CPU and GPU results match
     def test_ReflectionPad2d_large(self, device):
+        torch.use_deterministic_algorithms(True, warn_only=True)
         shapes = ([2, 65736, 6, 6], [65736, 2, 6, 6])
         pad = (1, 2, 3, 4)
         for shape in shapes:
@@ -8813,7 +8814,11 @@ class TestNNDeviceType(NNTestCase):
             out = F.pad(x, pad, mode='reflect')
             ref_out = F.pad(ref_x, pad, mode='reflect')
 
-            self.assertEqual(out, ref_out)
+            try:
+                self.assertEqual(out, ref_out)
+            except AssertionError:
+                print(f"Failure in forward pass for shape: {shape}")
+                raise
 
             g = torch.randn_like(out)
             ref_g = g.cpu()
@@ -8821,7 +8826,12 @@ class TestNNDeviceType(NNTestCase):
             out.backward(g)
             ref_out.backward(ref_g)
 
-            self.assertEqual(x.grad, ref_x.grad)
+            try:
+                self.assertEqual(x.grad, ref_x.grad)
+            except AssertionError:
+                print(f"Failure in backward pass for shape: {shape}")
+                raise
+
 
     @onlyNativeDeviceTypes
     def test_LocalResponseNorm_empty(self, device):
